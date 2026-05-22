@@ -335,11 +335,8 @@ void run_game(void)
     int vie = 3;
     int fin = 0;
 
-    int joy_val;
-    int dx;
+    int joy_x, joy_y, ax, ay;
     int k;
-
-    int rot_cd = 0;  // cooldown entre chaque cran de rotation
 
     // Asteroides
     int rx[6], ry[6], rr[6], rdx[6], rdy[6], ron[6];
@@ -368,27 +365,41 @@ void run_game(void)
     {
         cycle_leds();
 
-        // ================= JOYSTICK =================
-        joy_val = ADCC_GetSingleConversion(channel_X);
-        dx = joy_val - 512;
+        // ================= JOYSTICK - DIRECTION DIRECTE =================
+        joy_x = ADCC_GetSingleConversion(channel_X) - 512;
+        joy_y = ADCC_GetSingleConversion(channel_Y) - 512;
 
-        if(rot_cd > 0)
+        ax = joy_x > 0 ? joy_x : -joy_x;
+        ay = joy_y > 0 ? joy_y : -joy_y;
+
+        if(ax > 200 || ay > 200)
         {
-            rot_cd--;
-        }
-        else if(dx < -300)
-        {
-            draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
-            heading = (heading + 7) & 7;
-            draw_ship_angle(ship_x, ship_y, heading, pal[ship_color]);
-            rot_cd = 8;
-        }
-        else if(dx > 300)
-        {
-            draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
-            heading = (heading + 1) & 7;
-            draw_ship_angle(ship_x, ship_y, heading, pal[ship_color]);
-            rot_cd = 8;
+            int new_heading = heading;
+
+            if(ay > ax * 2)
+            {
+                if(joy_y < 0) new_heading = 0;  // haut
+                else          new_heading = 4;  // bas
+            }
+            else if(ax > ay * 2)
+            {
+                if(joy_x > 0) new_heading = 2;  // droite
+                else          new_heading = 6;  // gauche
+            }
+            else
+            {
+                if(joy_x > 0 && joy_y < 0) new_heading = 1;  // haut-droite
+                if(joy_x > 0 && joy_y > 0) new_heading = 3;  // bas-droite
+                if(joy_x < 0 && joy_y > 0) new_heading = 5;  // bas-gauche
+                if(joy_x < 0 && joy_y < 0) new_heading = 7;  // haut-gauche
+            }
+
+            if(new_heading != heading)
+            {
+                draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
+                heading = new_heading;
+                draw_ship_angle(ship_x, ship_y, heading, pal[ship_color]);
+            }
         }
 
         // ================= TIR =================
@@ -433,10 +444,12 @@ void run_game(void)
             rx[k] += rdx[k];
             ry[k] += rdy[k];
 
-            if(rx[k] < 0) rx[k] = 319;
+            if(rx[k] < 0)   rx[k] = 319;
             if(rx[k] > 319) rx[k] = 0;
-            if(ry[k] < 20) ry[k] = 214;
-            if(ry[k] > 214) ry[k] = 21;
+
+            // Mur invisible HUD : le bord de l'asteroide ne depasse jamais y=20
+            if(ry[k] - rr[k] < 20) ry[k] = 214 - rr[k];
+            if(ry[k] + rr[k] > 214) ry[k] = 20 + rr[k];
 
             if(blt_on)
             {
