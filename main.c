@@ -3,8 +3,11 @@
 #include "mcc_generated_files/adcc.h"
 #include "ILI9341.h"
 #include "GFX_Library.h"
+#include <math.h>
 
 #define ILI9341_ORANGE 0xFD20
+
+#define PI 3.14159f
 
 // Pages : 0=menu  1=jeu  2=score
 int page     = 0;
@@ -25,8 +28,23 @@ int blink_idx = 0;
 const int ANG_DX[8] = {   0,  71, 100,  71,   0, -71, -100, -71 };
 const int ANG_DY[8] = { -100, -71,   0,  71, 100,  71,    0, -71 };
 
-// Palette vaisseau : orange, violet, cyan
+// Palette vaisseau : orange
 uint16_t pal[3] = { ILI9341_ORANGE, 0xF81F, ILI9341_CYAN };
+
+// ----------------------------------------------------------------
+// Convertit les axes joystick en heading 0-7 via atan2.
+// atan2f(jx, -jy) donne l'angle depuis le Nord, sens horaire.
+// On divise le cercle en 8 secteurs de 45 deg chacun.
+static int joy_to_heading(int jx, int jy)
+{
+    float angle = atan2f((float)jx, -(float)jy);
+    // angle : -PI..PI, 0 = haut (nord), positif = sens horaire
+    if(angle < 0.0f) angle += 2.0f * PI;
+    // angle : 0..2PI
+    // +PI/8 pour centrer les secteurs, puis /( PI/4) pour avoir 0..8
+    int h = (int)((angle + PI / 8.0f) / (PI / 4.0f)) % 8;
+    return h;
+}
 
 // ----------------------------------------------------------------
 void cycle_leds(void)
@@ -279,23 +297,6 @@ void show_fin(int pts)
 }
 
 // ----------------------------------------------------------------
-// Retourne le heading 0-7 (0=haut, sens horaire) depuis les axes joystick.
-// Utilise tan(22.5 deg) ~ 5/12 pour des secteurs de 45 deg egaux.
-static int joy_to_heading(int jx, int jy)
-{
-    int ax = jx < 0 ? -jx : jx;
-    int ay = jy < 0 ? -jy : jy;
-
-    if(ax * 12 < ay * 5)               // dans les 22.5 deg autour du vertical
-        return (jy < 0) ? 0 : 4;       // haut / bas
-    if(ay * 12 < ax * 5)               // dans les 22.5 deg autour de l'horizontal
-        return (jx > 0) ? 2 : 6;       // droite / gauche
-    // diagonale
-    if(jx > 0) return (jy < 0) ? 1 : 3;   // haut-droite / bas-droite
-    else        return (jy < 0) ? 7 : 5;   // haut-gauche / bas-gauche
-}
-
-// ----------------------------------------------------------------
 void run_game(void)
 {
     int ship_x  = 160;
@@ -329,7 +330,7 @@ void run_game(void)
     {
         cycle_leds();
 
-        // --- JOYSTICK : direction via atan2 entier ---
+        // --- JOYSTICK : atan2f pour direction directe ---
         joy_x = ADCC_GetSingleConversion(channel_X) - 512;
         joy_y = ADCC_GetSingleConversion(channel_Y) - 512;
         ax = joy_x > 0 ? joy_x : -joy_x;
