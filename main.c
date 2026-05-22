@@ -3,11 +3,7 @@
 #include "mcc_generated_files/adcc.h"
 #include "ILI9341.h"
 #include "GFX_Library.h"
-#include <math.h>
-
 #define ILI9341_ORANGE 0xFD20
-
-#define PI 3.14159f
 
 // Pages : 0=menu  1=jeu  2=score
 int page     = 0;
@@ -30,21 +26,6 @@ const int ANG_DY[8] = { -100, -71,   0,  71, 100,  71,    0, -71 };
 
 // Palette vaisseau : orange
 uint16_t pal[3] = { ILI9341_ORANGE, 0xF81F, ILI9341_CYAN };
-
-// ----------------------------------------------------------------
-// Convertit les axes joystick en heading 0-7 via atan2.
-// atan2f(jx, -jy) donne l'angle depuis le Nord, sens horaire.
-// On divise le cercle en 8 secteurs de 45 deg chacun.
-static int joy_to_heading(int jx, int jy)
-{
-    float angle = atan2f((float)jx, -(float)jy);
-    // angle : -PI..PI, 0 = haut (nord), positif = sens horaire
-    if(angle < 0.0f) angle += 2.0f * PI;
-    // angle : 0..2PI
-    // +PI/8 pour centrer les secteurs, puis /( PI/4) pour avoir 0..8
-    int h = (int)((angle + PI / 8.0f) / (PI / 4.0f)) % 8;
-    return h;
-}
 
 // ----------------------------------------------------------------
 void cycle_leds(void)
@@ -305,7 +286,8 @@ void run_game(void)
 
     int blt_x = 0, blt_y = 0, blt_vx = 0, blt_vy = 0, blt_on = 0;
     int pts = 0, vie = 3, fin = 0;
-    int joy_x, joy_y, ax, ay, k;
+    int joy_x, ax, k;
+    int rot_cd = 0;
 
     int rx[6], ry[6], rr[6], rdx[6], rdy[6], ron[6];
 
@@ -330,21 +312,31 @@ void run_game(void)
     {
         cycle_leds();
 
-        // --- JOYSTICK : atan2f pour direction directe ---
+        // --- JOYSTICK : axe X tourne le vaisseau (CCW / CW) ---
         joy_x = ADCC_GetSingleConversion(channel_X) - 512;
-        joy_y = ADCC_GetSingleConversion(channel_Y) - 512;
         ax = joy_x > 0 ? joy_x : -joy_x;
-        ay = joy_y > 0 ? joy_y : -joy_y;
 
-        if(ax > 200 || ay > 200)
+        if(rot_cd > 0)
         {
-            int nh = joy_to_heading(joy_x, joy_y);
-            if(nh != heading)
-            {
-                draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
-                heading = nh;
-                draw_ship_angle(ship_x, ship_y, heading, pal[0]);
-            }
+            rot_cd--;
+        }
+        else if(joy_x < -200)
+        {
+            draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
+            heading = (heading + 7) & 7;
+            draw_ship_angle(ship_x, ship_y, heading, pal[0]);
+            rot_cd = 6;
+        }
+        else if(joy_x > 200)
+        {
+            draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
+            heading = (heading + 1) & 7;
+            draw_ship_angle(ship_x, ship_y, heading, pal[0]);
+            rot_cd = 6;
+        }
+        else
+        {
+            rot_cd = 0;
         }
 
         // --- TIR : bouton B ---
