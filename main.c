@@ -286,8 +286,7 @@ void run_game(void)
 
     int blt_x = 0, blt_y = 0, blt_vx = 0, blt_vy = 0, blt_on = 0;
     int pts = 0, vie = 3, fin = 0;
-    int joy_x, ax, k;
-    int rot_cd = 0;
+    int joy_x, joy_y, ax, ay, k;
 
     int rx[6], ry[6], rr[6], rdx[6], rdy[6], ron[6];
 
@@ -312,28 +311,30 @@ void run_game(void)
     {
         cycle_leds();
 
-        // JOYSTICK : rotation proportionnelle a la deflexion du stick
+        // JOYSTICK : direction directe — la pointe suit immediatement le stick
         joy_x = ADCC_GetSingleConversion(channel_X) - 512;
+        joy_y = ADCC_GetSingleConversion(channel_Y) - 512;
         ax = joy_x > 0 ? joy_x : -joy_x;
+        ay = joy_y > 0 ? joy_y : -joy_y;
 
-        if(rot_cd > 0)
+        if(ax > 150 || ay > 150)
         {
-            rot_cd--;
-        }
-        else if(ax > 150)
-        {
-            draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
-            if(joy_x < 0) heading = (heading + 7) & 7;
-            else          heading = (heading + 1) & 7;
-            draw_ship_angle(ship_x, ship_y, heading, pal[0]);
-            // Plus le joystick est pousse, plus la rotation est rapide
-            if(ax > 450)      rot_cd = 1;
-            else if(ax > 300) rot_cd = 3;
-            else              rot_cd = 5;
-        }
-        else
-        {
-            rot_cd = 0;
+            int nh;
+            if(ax > ay * 2)
+                nh = (joy_x > 0) ? 2 : 6;
+            else if(ay > ax * 2)
+                nh = (joy_y < 0) ? 0 : 4;
+            else if(joy_x > 0)
+                nh = (joy_y < 0) ? 1 : 3;
+            else
+                nh = (joy_y < 0) ? 7 : 5;
+
+            if(nh != heading)
+            {
+                draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
+                heading = nh;
+                draw_ship_angle(ship_x, ship_y, heading, pal[0]);
+            }
         }
 
         // --- TIR : bouton B ---
