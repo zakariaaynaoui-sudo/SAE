@@ -1,337 +1,562 @@
-/* ============================================================================
- * TP5 - IHM non bloquante (FSM) + taches telerupteurs
- * Cible : PIC 16F18877
- * ============================================================================
- * Ce programme illustre deux concepts :
- *   1. Une IHM (interface serie via PuTTY) refactorisee d'un algorithme
- *      bloquant (TP4) vers une machine a etats finis (FSM) non bloquante.
- *   2. L'execution sequentielle de plusieurs FSM dans la boucle principale
- *      donne l'illusion d'un fonctionnement multitache.
- *
- * Trois taches s'executent "en parallele" :
- *   - IHM()       : operation arithmetique entre 2 nombres via PuTTY
- *   - telerupt1() : commande de la LED D2 par le bouton S1
- *   - telerupt2() : commande de la LED D3 par le bouton S2
- * ============================================================================
- */
-
-#include <stdio.h>
-#include <stdlib.h>
 #include "mcc_generated_files/mcc.h"
+#include "mcc_generated_files/pin_manager.h"
+#include "mcc_generated_files/adcc.h"
+#include "ILI9341.h"
+#include "GFX_Library.h"
 
-/* ---------------------------------------------------------------------------
- * Alias des E/S (a adapter si MCC genere d'autres noms)
- *   - Boutons :  S1 = RB4, S2 = RB5  (actifs bas avec pull-up)
- *   - LEDs    :  D2 = RA4, D3 = RA5
- * ------------------------------------------------------------------------- */
-#define BP_S1        (PORTBbits.RB4)
-#define BP_S2        (PORTBbits.RB5)
-#define LED_D2       (LATAbits.LATA4)
-#define LED_D3       (LATAbits.LATA5)
+#define ILI9341_ORANGE 0xFD20
 
-#define BP_ENFONCE   0
-#define BP_RELACHE   1
-#define LED_ALLUMEE  1
-#define LED_ETEINTE  0
+// Pages : 0=menu  1=jeu  2=score
+int page     = 0;
+int menu_sel = 0;   // 0=JOUER  1=SCORE  2=QUITTER
 
+// Vaisseau (style fixe, fleche orange)
+int ship_style = 0;
+int ship_color = 0;
+int niveau     = 2;   // Normal par defaut
 
-/* ===========================================================================
- *  1) TACHE IHM : operation arithmetique entre 2 nombres (FSM 5 etats)
- * ===========================================================================
- *
- *                       +---------------+
- *                       |  ETAT_INIT    |   <-- etat d'amorcage
- *                       +---------------+
- *                              |
- *                              | (transition inconditionnelle)
- *                              | / effacer ecran, afficher titre,
- *                              |   demander 1er nombre
- *                              v
- *                       +---------------+
- *                       |  ATTENTE_NB1  |
- *                       +---------------+
- *                              |
- *                              | EUSART_Read_Str(nombre) == true
- *                              | / nb1 = atol(nombre);
- *                              |   demander operateur
- *                              v
- *                       +---------------+
- *                       |  ATTENTE_OP   |<--+ (car invalide : on re-demande)
- *                       +---------------+   |
- *                              |            |
- *                              | car E {'+','-','*','/'}
- *                              | / op = car; demander 2eme nombre
- *                              v
- *                       +---------------+
- *                       |  ATTENTE_NB2  |
- *                       +---------------+
- *                              |
- *                              | EUSART_Read_Str(nombre) == true
- *                              | / nb2 = atol(nombre); calculer res;
- *                              |   afficher "nb1 op nb2 = res";
- *                              |   demander appui sur barre espace
- *                              v
- *                       +-----------------+
- *                       | ATTENTE_ESPACE  |
- *                       +-----------------+
- *                              |
- *                              | car recu == ' '
- *                              v
- *                       retour a ETAT_INIT
- * ---------------------------------------------------------------------------
- * REGLE D'OR (cf. enonce TP) : les printf des messages d'invitation sont
- * places dans la TRANSITION qui amene a l'etat d'attente, et JAMAIS dans
- * l'etat lui-meme, sinon le message serait reaffiche en permanence.
- * ---------------------------------------------------------------------------
- */
+// LEDs
+#define RL_ON()  do { LATEbits.LATE0 = 1; } while(0)
+#define RL_OFF() do { LATEbits.LATE0 = 0; } while(0)
+#define GL_ON()  do { LATEbits.LATE1 = 1; } while(0)
+#define GL_OFF() do { LATEbits.LATE1 = 0; } while(0)
+#define BL_ON()  do { LATEbits.LATE2 = 1; } while(0)
+#define BL_OFF() do { LATEbits.LATE2 = 0; } while(0)
 
-typedef enum {
-    ETAT_INIT,
-    ATTENTE_NB1,
-    ATTENTE_OP,
-    ATTENTE_NB2,
-    ATTENTE_ESPACE
-} etat_IHM_t;
+int blink_cnt = 0;
+int blink_idx = 0;
 
-void IHM(void)
+// 8 directions unitaires (x100)
+const int ANG_DX[8] = {  0,  71, 100,  71,   0, -71, -100, -71 };
+const int ANG_DY[8] = {-100, -71,   0,  71, 100,  71,    0, -71 };
+
+// Palette vaisseau : orange, violet, cyan
+uint16_t pal[3] = { ILI9341_ORANGE, 0xF81F, ILI9341_CYAN };
+
+/* ------------------------------------------------------------------ */
+/*  LED cycling                                                         */
+/* ------------------------------------------------------------------ */
+void cycle_leds(void)
 {
-    static etat_IHM_t etat = ETAT_INIT;
-    static char       nombre[64];
-    static int32_t    nb1, nb2, res;
-    static char       op;
-    char              c;
-
-    switch (etat)
+    blink_cnt++;
+    if(blink_cnt >= 5)
     {
-        case ETAT_INIT:
-            // ACTION de la transition vers ATTENTE_NB1
-            printf("\x1B[2J"); printf("\x1B[H");                 // efface ecran
-            printf(" ****** Operation entre 2 nombres ********\n\r");
-            printf("Donner un premier nombre:\n");
-            etat = ATTENTE_NB1;
-            break;
-
-        case ATTENTE_NB1:
-            // EUSART_Read_Str() est deja non bloquante : elle renvoie false
-            // tant que la chaine n'est pas complete, true quand Enter est tape.
-            if (EUSART_Read_Str(nombre) == true)
-            {
-                nb1 = atol(nombre);
-                // ACTION de la transition vers ATTENTE_OP
-                printf("Donner l'operateur:\n");
-                etat = ATTENTE_OP;
-            }
-            break;
-
-        case ATTENTE_OP:
-            // Lecture d'UN caractere seulement s'il est dispo (non bloquant)
-            if (EUSART_is_rx_ready())
-            {
-                c = EUSART_Read();
-                if (c == '+' || c == '-' || c == '*' || c == '/')
-                {
-                    op = c;
-                    putch(13);
-                    // ACTION de la transition vers ATTENTE_NB2
-                    printf("Donner un deuxieme nombre:\n");
-                    etat = ATTENTE_NB2;
-                }
-                else
-                {
-                    // caractere invalide : on redemande sans changer d'etat
-                    printf("Donner l'operateur:\n");
-                }
-            }
-            break;
-
-        case ATTENTE_NB2:
-            if (EUSART_Read_Str(nombre) == true)
-            {
-                nb2 = atol(nombre);
-
-                // Calcul du resultat
-                switch (op)
-                {
-                    case '+': res = nb1 + nb2; break;
-                    case '-': res = nb1 - nb2; break;
-                    case '*': res = nb1 * nb2; break;
-                    case '/':
-                        if (nb2 != 0) res = nb1 / nb2;
-                        else printf("Operation impossible !!! (division par zero)\n");
-                        break;
-                }
-                printf("%ld %c %ld = %ld\n", nb1, op, nb2, res);
-
-                // ACTION de la transition vers ATTENTE_ESPACE
-                putch(13);
-                printf("Appuyer sur barre espace pour une nouvelle operation\n");
-                etat = ATTENTE_ESPACE;
-            }
-            break;
-
-        case ATTENTE_ESPACE:
-            if (EUSART_is_rx_ready())
-            {
-                c = EUSART_Read();
-                if (c == ' ')
-                {
-                    etat = ETAT_INIT;       // on reboucle pour une nouvelle operation
-                }
-            }
-            break;
+        blink_cnt = 0;
+        RL_OFF(); GL_OFF(); BL_OFF();
+        if(blink_idx == 0) RL_ON();
+        if(blink_idx == 1) BL_ON();
+        if(blink_idx == 2) GL_ON();
+        if(++blink_idx > 2) blink_idx = 0;
     }
 }
 
-
-/* ===========================================================================
- *  2) TACHES TELERUPTEUR : commande LED par bouton poussoir (FSM 5 etats)
- * ===========================================================================
- *                           Reset uC
- *                              |
- *                              | / Eteindre LED
- *                              v
- *                      +---------------+
- *                      |  Etat initial |
- *                      +---------------+
- *                              | BP relache  (securite : pas de BP tenu au boot)
- *                              v
- *               +-----------------------------+   BP relache
- *               | Attente appui BP pr eclair  |<------+
- *               +-----------------------------+-------+ (self-loop implicite)
- *                              | BP enfonce
- *                              | / Allumer LED
- *                              v
- *               +-----------------------------+
- *               | Attente relache BP apr ecl  |
- *               +-----------------------------+
- *                              | BP relache
- *                              v
- *               +-----------------------------+  BP relache
- *               | Attente appui BP pr eteind  |<------+
- *               +-----------------------------+-------+
- *                              | BP enfonce
- *                              | / Eteindre LED
- *                              v
- *               +-----------------------------+
- *               | Attente relache BP apr ext  |
- *               +-----------------------------+
- *                              | BP relache
- *                              |
- *                              +---> retour a "Attente appui BP pr eclairer"
- * ---------------------------------------------------------------------------
- * Les etats "Attente relachement" sont indispensables : sans eux, tant que
- * l'utilisateur garde le doigt sur le bouton, la LED clignoterait sans cesse.
- * ---------------------------------------------------------------------------
- */
-
-typedef enum {
-    TR_INIT,
-    TR_ATTENTE_APPUI_ECLAIRER,
-    TR_ATTENTE_RELACHE_APRES_ECLAIRAGE,
-    TR_ATTENTE_APPUI_ETEINDRE,
-    TR_ATTENTE_RELACHE_APRES_EXTINCTION
-} etat_telerupt_t;
-
-void telerupt1(void)
+/* ------------------------------------------------------------------ */
+/*  Forme vaisseau - fleche uniquement                                  */
+/* ------------------------------------------------------------------ */
+void draw_ship(int cx, int cy, uint16_t col)
 {
-    static etat_telerupt_t etat = TR_INIT;
-
-    switch (etat)
-    {
-        case TR_INIT:
-            LED_D2 = LED_ETEINTE;                       // action : eteindre LED
-            if (BP_S1 == BP_RELACHE)
-                etat = TR_ATTENTE_APPUI_ECLAIRER;
-            break;
-
-        case TR_ATTENTE_APPUI_ECLAIRER:
-            if (BP_S1 == BP_ENFONCE)
-            {
-                LED_D2 = LED_ALLUMEE;                   // action de transition
-                etat = TR_ATTENTE_RELACHE_APRES_ECLAIRAGE;
-            }
-            break;
-
-        case TR_ATTENTE_RELACHE_APRES_ECLAIRAGE:
-            if (BP_S1 == BP_RELACHE)
-                etat = TR_ATTENTE_APPUI_ETEINDRE;
-            break;
-
-        case TR_ATTENTE_APPUI_ETEINDRE:
-            if (BP_S1 == BP_ENFONCE)
-            {
-                LED_D2 = LED_ETEINTE;                   // action de transition
-                etat = TR_ATTENTE_RELACHE_APRES_EXTINCTION;
-            }
-            break;
-
-        case TR_ATTENTE_RELACHE_APRES_EXTINCTION:
-            if (BP_S1 == BP_RELACHE)
-                etat = TR_ATTENTE_APPUI_ECLAIRER;       // boucle
-            break;
-    }
+    display_drawLine(cx,   cy-14, cx-8, cy+8, col);
+    display_drawLine(cx,   cy-14, cx+8, cy+8, col);
+    display_drawLine(cx-5, cy+2,  cx+5, cy+2, col);
+    display_drawLine(cx-8, cy+8,  cx+8, cy+8, col);
 }
 
-void telerupt2(void)
+/* ------------------------------------------------------------------ */
+/*  Vaisseau oriente (triangle) - en jeu                               */
+/* ------------------------------------------------------------------ */
+void draw_ship_angle(int cx, int cy, int ang, uint16_t col)
 {
-    // Copie de telerupt1() adaptee : LED D3 et bouton S2.
-    static etat_telerupt_t etat = TR_INIT;
-
-    switch (etat)
-    {
-        case TR_INIT:
-            LED_D3 = LED_ETEINTE;
-            if (BP_S2 == BP_RELACHE)
-                etat = TR_ATTENTE_APPUI_ECLAIRER;
-            break;
-
-        case TR_ATTENTE_APPUI_ECLAIRER:
-            if (BP_S2 == BP_ENFONCE)
-            {
-                LED_D3 = LED_ALLUMEE;
-                etat = TR_ATTENTE_RELACHE_APRES_ECLAIRAGE;
-            }
-            break;
-
-        case TR_ATTENTE_RELACHE_APRES_ECLAIRAGE:
-            if (BP_S2 == BP_RELACHE)
-                etat = TR_ATTENTE_APPUI_ETEINDRE;
-            break;
-
-        case TR_ATTENTE_APPUI_ETEINDRE:
-            if (BP_S2 == BP_ENFONCE)
-            {
-                LED_D3 = LED_ETEINTE;
-                etat = TR_ATTENTE_RELACHE_APRES_EXTINCTION;
-            }
-            break;
-
-        case TR_ATTENTE_RELACHE_APRES_EXTINCTION:
-            if (BP_S2 == BP_RELACHE)
-                etat = TR_ATTENTE_APPUI_ECLAIRER;
-            break;
-    }
+    int fx = cx + ANG_DX[ang]          * 15 / 100;
+    int fy = cy + ANG_DY[ang]          * 15 / 100;
+    int lx = cx + ANG_DX[(ang+3) % 8] * 10 / 100;
+    int ly = cy + ANG_DY[(ang+3) % 8] * 10 / 100;
+    int rx = cx + ANG_DX[(ang+5) % 8] * 10 / 100;
+    int ry = cy + ANG_DY[(ang+5) % 8] * 10 / 100;
+    display_drawLine(fx, fy, lx, ly, col);
+    display_drawLine(fx, fy, rx, ry, col);
+    display_drawLine(lx, ly, rx, ry, col);
 }
 
+/* ------------------------------------------------------------------ */
+/*  Fond etoile - theme violet/cyan                                     */
+/* ------------------------------------------------------------------ */
+void draw_stars(void)
+{
+    display_fillCircle(20,   18,  2, ILI9341_WHITE);
+    display_fillCircle(285,  12,  2, ILI9341_WHITE);
+    display_fillCircle(55,   50,  1, ILI9341_WHITE);
+    display_fillCircle(255,  58,  1, 0xF81F);
+    display_fillCircle(155,  32,  1, ILI9341_WHITE);
+    display_fillCircle(18,   72,  1, 0xF81F);
+    display_fillCircle(300,  48,  1, ILI9341_CYAN);
+    display_fillCircle(95,   22,  1, ILI9341_WHITE);
+    display_fillCircle(235,  38,  1, 0xF81F);
+    display_fillCircle(308,  88,  1, ILI9341_WHITE);
+    display_fillCircle(8,   105,  1, ILI9341_WHITE);
+    display_fillCircle(195,  22,  1, ILI9341_CYAN);
+    display_fillCircle(130, 140,  1, ILI9341_WHITE);
+    display_fillCircle(270, 160,  1, 0xF81F);
+    display_fillCircle(45,  175,  1, ILI9341_CYAN);
+    display_fillCircle(180,  90,  1, ILI9341_WHITE);
+    display_fillCircle(310, 130,  1, ILI9341_WHITE);
+    display_fillCircle(75,  200,  1, 0xF81F);
+    display_fillCircle(340,  55,  1, ILI9341_WHITE);
+}
 
-/* ===========================================================================
- *  3) BOUCLE PRINCIPALE
- * ===========================================================================
- * Les trois fonctions sont appelees sequentiellement a chaque tour de boucle.
- * Comme chacune est non bloquante (elle execute uniquement le code de l'etat
- * courant puis rend la main), le microcontroleur traite "en parallele" les
- * trois taches. L'IHM continue de tourner pendant que l'utilisateur appuie
- * sur S1/S2 pour piloter les LEDs.
- * ---------------------------------------------------------------------------
- */
+/* ------------------------------------------------------------------ */
+/*  Menu principal  (JOUER / SCORE / QUITTER)                          */
+/* ------------------------------------------------------------------ */
+void show_menu(void)
+{
+    fillScreen(ILI9341_BLACK);
+    draw_stars();
+
+    display_drawRect(3,  3,  314, 234, 0xF81F);
+    display_drawRect(6,  6,  308, 228, ILI9341_CYAN);
+
+    fillRect(7, 7, 306, 58, 0x000C);
+    display_drawLine(7, 65, 313, 65, 0xF81F);
+
+    display_setCursor(38, 18); display_setTextSize(3);
+    display_setTextColor2(ILI9341_YELLOW);
+    display_print('A');display_print('S');display_print('T');
+    display_print('E');display_print('R');display_print('O');
+    display_print('I');display_print('D');
+
+    draw_ship(297, 38, ILI9341_CYAN);
+
+    // ---- JOUER ----
+    if(menu_sel == 0) fillRect(20, 74, 280, 34, 0x0420);
+    display_setCursor(50, 84); display_setTextSize(2);
+    display_setTextColor2(menu_sel == 0 ? ILI9341_YELLOW : ILI9341_GREEN);
+    display_print('J');display_print('O');display_print('U');
+    display_print('E');display_print('R');
+
+    // ---- SCORE ----
+    if(menu_sel == 1) fillRect(20, 112, 280, 34, 0x0420);
+    display_setCursor(50, 122); display_setTextSize(2);
+    display_setTextColor2(menu_sel == 1 ? ILI9341_YELLOW : ILI9341_CYAN);
+    display_print('S');display_print('C');display_print('O');
+    display_print('R');display_print('E');
+
+    // ---- QUITTER ----
+    if(menu_sel == 2) fillRect(20, 150, 280, 34, 0x2000);
+    display_setCursor(50, 160); display_setTextSize(2);
+    display_setTextColor2(menu_sel == 2 ? ILI9341_YELLOW : ILI9341_RED);
+    display_print('Q');display_print('U');display_print('I');
+    display_print('T');display_print('T');display_print('E');
+    display_print('R');
+
+    display_setCursor(28, 84 + menu_sel * 38);
+    display_setTextSize(2);
+    display_setTextColor2(0xF81F);
+    display_print('>');
+
+    display_drawLine(7, 218, 313, 218, 0xF81F);
+    fillRect(7, 219, 306, 15, 0x000C);
+    display_setCursor(18, 224); display_setTextSize(1);
+    display_setTextColor2(ILI9341_LIGHTGREY);
+    display_print('A');display_print('/');display_print('C');
+    display_print('=');display_print('N');display_print('A');
+    display_print('V');display_print(' ');
+    display_print('B');display_print('=');display_print('O');
+    display_print('K');display_print(' ');
+    display_print('D');display_print('=');display_print('R');
+    display_print('E');display_print('T');
+}
+
+/* ------------------------------------------------------------------ */
+/*  Page Score (Hall of Fame)                                           */
+/* ------------------------------------------------------------------ */
+void show_score(void)
+{
+    fillScreen(ILI9341_BLACK);
+    draw_stars();
+
+    display_drawRect(3, 3, 314, 234, 0xF81F);
+    display_drawRect(6, 6, 308, 228, ILI9341_CYAN);
+
+    fillRect(7, 7, 306, 18, 0x000C);
+    display_drawLine(7, 25, 313, 25, 0xF81F);
+
+    display_setCursor(108, 10); display_setTextSize(1);
+    display_setTextColor2(ILI9341_YELLOW);
+    display_print('H');display_print('A');display_print('L');
+    display_print('L');display_print(' ');display_print('O');
+    display_print('F');display_print(' ');display_print('F');
+    display_print('A');display_print('M');display_print('E');
+
+    // 1er
+    fillRect(20, 50, 280, 38, 0x8400);
+    display_drawRect(20, 50, 280, 38, ILI9341_YELLOW);
+    display_fillCircle(40, 69, 13, ILI9341_YELLOW);
+    display_setCursor(34, 63); display_setTextSize(2);
+    display_setTextColor2(ILI9341_BLACK);
+    display_print('1');
+    display_setCursor(65, 63); display_setTextColor2(ILI9341_YELLOW);
+    display_setTextSize(2);
+    display_print('0');display_print('0');display_print('0');
+    display_print('0');display_print('0');
+    display_setCursor(185, 66); display_setTextSize(1);
+    display_setTextColor2(ILI9341_LIGHTGREY);
+    display_print('P');display_print('T');display_print('S');
+
+    // 2eme
+    fillRect(20, 100, 280, 38, 0x2104);
+    display_drawRect(20, 100, 280, 38, ILI9341_LIGHTGREY);
+    display_fillCircle(40, 119, 13, ILI9341_LIGHTGREY);
+    display_setCursor(34, 113); display_setTextSize(2);
+    display_setTextColor2(ILI9341_BLACK);
+    display_print('2');
+    display_setCursor(65, 113); display_setTextColor2(ILI9341_LIGHTGREY);
+    display_setTextSize(2);
+    display_print('0');display_print('0');display_print('0');
+    display_print('0');display_print('0');
+    display_setCursor(185, 116); display_setTextSize(1);
+    display_setTextColor2(ILI9341_LIGHTGREY);
+    display_print('P');display_print('T');display_print('S');
+
+    // 3eme
+    fillRect(20, 150, 280, 38, 0x4200);
+    display_drawRect(20, 150, 280, 38, ILI9341_ORANGE);
+    display_fillCircle(40, 169, 13, ILI9341_ORANGE);
+    display_setCursor(34, 163); display_setTextSize(2);
+    display_setTextColor2(ILI9341_BLACK);
+    display_print('3');
+    display_setCursor(65, 163); display_setTextColor2(ILI9341_ORANGE);
+    display_setTextSize(2);
+    display_print('0');display_print('0');display_print('0');
+    display_print('0');display_print('0');
+    display_setCursor(185, 166); display_setTextSize(1);
+    display_setTextColor2(ILI9341_LIGHTGREY);
+    display_print('P');display_print('T');display_print('S');
+
+    display_drawLine(7, 218, 313, 218, 0xF81F);
+    fillRect(7, 219, 306, 15, 0x000C);
+    display_setCursor(18, 224); display_setTextSize(1);
+    display_setTextColor2(ILI9341_LIGHTGREY);
+    display_print('D');display_print('=');display_print('R');
+    display_print('E');display_print('T');display_print('O');
+    display_print('U');display_print('R');
+}
+
+/* ------------------------------------------------------------------ */
+/*  HUD en jeu                                                          */
+/* ------------------------------------------------------------------ */
+void draw_hud(int pts, int vie)
+{
+    int k;
+    fillRect(0, 0, 320, 18, ILI9341_BLACK);
+    display_setCursor(5, 5); display_setTextSize(1);
+    display_setTextColor2(ILI9341_YELLOW);
+    display_print('P');display_print('T');display_print('S');
+    display_print(':');display_print(' ');
+    int t = pts;
+    if(t >= 10000) display_print('0' + (t/10000)%10);
+    if(t >= 1000)  display_print('0' + (t/1000)%10);
+    if(t >= 100)   display_print('0' + (t/100)%10);
+    if(t >= 10)    display_print('0' + (t/10)%10);
+    display_print('0' + t%10);
+    for(k = 0; k < vie; k++)
+        display_fillCircle(265 + k*18, 8, 5, 0xF81F);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Ecran Game Over                                                     */
+/* ------------------------------------------------------------------ */
+void show_fin(int pts)
+{
+    fillScreen(ILI9341_BLACK);
+    draw_stars();
+
+    fillRect(38, 53, 244, 144, 0x000A);
+    display_drawRect(38, 53, 244, 144, 0xF81F);
+    display_drawRect(40, 55, 240, 140, 0x8008);
+
+    display_setCursor(55, 66); display_setTextSize(3);
+    display_setTextColor2(ILI9341_RED);
+    display_print('G');display_print('A');display_print('M');
+    display_print('E');
+
+    display_setCursor(72, 100);
+    display_print('O');display_print('V');display_print('E');
+    display_print('R');
+
+    display_drawLine(55, 133, 265, 133, 0xF81F);
+
+    display_setCursor(60, 143); display_setTextSize(2);
+    display_setTextColor2(ILI9341_YELLOW);
+    display_print('P');display_print('T');display_print('S');
+    display_print(':');display_print(' ');
+    int t = pts;
+    if(t >= 10000) display_print('0' + (t/10000)%10);
+    if(t >= 1000)  display_print('0' + (t/1000)%10);
+    if(t >= 100)   display_print('0' + (t/100)%10);
+    if(t >= 10)    display_print('0' + (t/10)%10);
+    display_print('0' + t%10);
+
+    display_setCursor(58, 178); display_setTextSize(1);
+    display_setTextColor2(ILI9341_LIGHTGREY);
+    display_print('A');display_print('p');display_print('p');
+    display_print('u');display_print('i');display_print('e');
+    display_print(' ');display_print('B');display_print(' ');
+    display_print('p');display_print('o');display_print('u');
+    display_print('r');display_print(' ');display_print('r');
+    display_print('e');display_print('j');display_print('o');
+    display_print('u');display_print('e');display_print('r');
+
+    RL_ON(); __delay_ms(250); RL_OFF(); __delay_ms(250);
+    RL_ON(); __delay_ms(250); RL_OFF(); __delay_ms(250);
+    RL_ON(); __delay_ms(250); RL_OFF();
+
+    while(IO_RB4_GetValue() == 1) { }
+    __delay_ms(200);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Boucle de jeu principale                                            */
+/* ------------------------------------------------------------------ */
+void run_game(void)
+{
+    int ship_x = 160;
+    int ship_y = 120;
+
+    int heading = 0;
+    int ship_color = 0;
+
+    // Projectile
+    int blt_x = 0;
+    int blt_y = 0;
+    int blt_vx = 0;
+    int blt_vy = 0;
+    int blt_on = 0;
+
+    int pts = 0;
+    int vie = 3;
+    int fin = 0;
+
+    int joy_val;
+    int dx;
+    int k;
+
+    // Detecte le flanc du joystick : 1 = joystick au centre, pret pour une nouvelle rotation
+    // Le vaisseau ne tourne qu'UNE fois par poussee ; il faut relacher le stick au centre
+    // avant de pouvoir tourner a nouveau.
+    int joy_at_center = 1;
+
+    // Asteroides
+    int rx[6], ry[6], rr[6], rdx[6], rdy[6], ron[6];
+
+    rx[0]=45;  ry[0]=45;  rr[0]=15; rdx[0]= 1; rdy[0]= 1; ron[0]=1;
+    rx[1]=275; ry[1]=45; rr[1]=15; rdx[1]=-1; rdy[1]= 1; ron[1]=1;
+    rx[2]=160; ry[2]=195; rr[2]=15; rdx[2]= 1; rdy[2]=-1; ron[2]=1;
+
+    rx[3]=0; ry[3]=0; rr[3]=8; rdx[3]=0; rdy[3]=0; ron[3]=0;
+    rx[4]=0; ry[4]=0; rr[4]=8; rdx[4]=0; rdy[4]=0; ron[4]=0;
+    rx[5]=0; ry[5]=0; rr[5]=8; rdx[5]=0; rdy[5]=0; ron[5]=0;
+
+    fillScreen(ILI9341_BLACK);
+    draw_stars();
+    draw_hud(pts, vie);
+
+    for(k=0;k<6;k++)
+    {
+        if(ron[k])
+            display_drawCircle(rx[k], ry[k], rr[k], ILI9341_LIGHTGREY);
+    }
+
+    draw_ship_angle(ship_x, ship_y, heading, pal[ship_color]);
+
+    while(fin == 0)
+    {
+        cycle_leds();
+
+        // ================= JOYSTICK =================
+        joy_val = ADCC_GetSingleConversion(channel_X);
+        dx = joy_val - 512;
+
+        if(dx >= -300 && dx <= 300)
+        {
+            // Joystick revenu au centre : autorise la prochaine rotation
+            joy_at_center = 1;
+        }
+        else if(joy_at_center)
+        {
+            // Premiere frame hors centre : on tourne UNE seule fois puis on bloque
+            joy_at_center = 0;
+
+            if(dx < -300)
+            {
+                draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
+                heading = (heading + 7) & 7;
+                draw_ship_angle(ship_x, ship_y, heading, pal[ship_color]);
+            }
+            else if(dx > 300)
+            {
+                draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
+                heading = (heading + 1) & 7;
+                draw_ship_angle(ship_x, ship_y, heading, pal[ship_color]);
+            }
+        }
+        // Si joy_at_center == 0 et joystick toujours pousse : on ne fait rien
+
+        // ================= TIR =================
+        if(IO_RB4_GetValue() == 0 && blt_on == 0)
+        {
+            blt_x = ship_x;
+            blt_y = ship_y;
+            blt_vx = ANG_DX[heading];
+            blt_vy = ANG_DY[heading];
+            blt_on = 1;
+        }
+
+        // ================= BULLET MOVE =================
+        if(blt_on)
+        {
+            display_fillCircle(blt_x, blt_y, 2, ILI9341_BLACK);
+
+            blt_x += blt_vx * 14 / 100;
+            blt_y += blt_vy * 14 / 100;
+
+            if(blt_x < 0 || blt_x > 319 || blt_y < 20 || blt_y > 214)
+            {
+                blt_on = 0;
+            }
+            else
+            {
+                display_fillCircle(blt_x, blt_y, 2, ILI9341_YELLOW);
+            }
+        }
+
+        // ================= ASTEROIDS =================
+        int nb_on = 0;
+        for(k=0;k<6;k++)
+        {
+            int ex, ey;
+
+            if(ron[k] == 0)
+                nb_on++;
+
+            display_drawCircle(rx[k], ry[k], rr[k], ILI9341_BLACK);
+
+            rx[k] += rdx[k];
+            ry[k] += rdy[k];
+
+            if(rx[k] < 0) rx[k] = 319;
+            if(rx[k] > 319) rx[k] = 0;
+            if(ry[k] < 20) ry[k] = 214;
+            if(ry[k] > 214) ry[k] = 21;
+
+            if(blt_on)
+            {
+                ex = blt_x - rx[k];
+                if(ex < 0) ex = -ex;
+                ey = blt_y - ry[k];
+                if(ey < 0) ey = -ey;
+
+                if(ex < rr[k]+3 && ey < rr[k]+3)
+                {
+                    display_fillCircle(blt_x, blt_y, 2, ILI9341_BLACK);
+                    blt_on = 0;
+                    ron[k] = 0;
+                    pts += 20;
+                    draw_hud(pts, vie);
+                    GL_ON();
+                    __delay_ms(50);
+                    GL_OFF();
+                }
+            }
+
+            if(ron[k])
+            {
+                display_drawCircle(rx[k], ry[k], rr[k], ILI9341_LIGHTGREY);
+            }
+        }
+
+        // ================= QUIT =================
+        if(IO_RB3_GetValue() == 0)
+        {
+            __delay_ms(200);
+            page = 0;
+            menu_sel = 0;
+            show_menu();
+            return;
+        }
+
+        __delay_ms(15);
+    }
+
+    show_fin(pts);
+    page = 0;
+    menu_sel = 0;
+    show_menu();
+}
+
+/* ================================================================== */
+/*  MAIN                                                               */
+/* ================================================================== */
 void main(void)
 {
     SYSTEM_Initialize();
 
-    while (1)
+    TRISEbits.TRISE0 = 0;
+    TRISEbits.TRISE1 = 0;
+    TRISEbits.TRISE2 = 0;
+    RL_OFF(); GL_OFF(); BL_OFF();
+
+    SPI1_Open(SPI1_DEFAULT);
+    tft_begin();
+    setRotation(3);
+    fillScreen(ILI9341_BLACK);
+
+    show_menu();
+
+    while(1)
     {
-        IHM();
-        telerupt1();
-        telerupt2();
+        cycle_leds();
+
+        // BTN haut : A (RB6)
+        if(IO_RB6_GetValue() == 0)
+        {
+            if(page == 0)
+            {
+                if(--menu_sel < 0) menu_sel = 2;
+                show_menu();
+            }
+            __delay_ms(200);
+        }
+
+        // BTN bas : C (RB7)
+        if(IO_RB7_GetValue() == 0)
+        {
+            if(page == 0)
+            {
+                if(++menu_sel > 2) menu_sel = 0;
+                show_menu();
+            }
+            __delay_ms(200);
+        }
+
+        // BTN OK : B (RB4)
+        if(IO_RB4_GetValue() == 0)
+        {
+            if(page == 0)
+            {
+                if(menu_sel == 0) { page = 1; run_game(); }
+                if(menu_sel == 1) { page = 2; show_score(); }
+                if(menu_sel == 2) { fillScreen(ILI9341_BLACK); }
+            }
+            __delay_ms(200);
+        }
+
+        // BTN retour : D (RB3)
+        if(IO_RB3_GetValue() == 0)
+        {
+            page = 0; menu_sel = 0;
+            show_menu();
+            __delay_ms(200);
+        }
+
+        __delay_ms(100);
     }
 }
