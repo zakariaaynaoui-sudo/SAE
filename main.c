@@ -339,10 +339,7 @@ void run_game(void)
     int dx;
     int k;
 
-    // Detecte le flanc du joystick : 1 = joystick au centre, pret pour une nouvelle rotation
-    // Le vaisseau ne tourne qu'UNE fois par poussee ; il faut relacher le stick au centre
-    // avant de pouvoir tourner a nouveau.
-    int joy_at_center = 1;
+    int rot_cd = 0;  // cooldown entre chaque cran de rotation
 
     // Asteroides
     int rx[6], ry[6], rr[6], rdx[6], rdy[6], ron[6];
@@ -375,30 +372,24 @@ void run_game(void)
         joy_val = ADCC_GetSingleConversion(channel_X);
         dx = joy_val - 512;
 
-        if(dx >= -300 && dx <= 300)
+        if(rot_cd > 0)
         {
-            // Joystick revenu au centre : autorise la prochaine rotation
-            joy_at_center = 1;
+            rot_cd--;
         }
-        else if(joy_at_center)
+        else if(dx < -300)
         {
-            // Premiere frame hors centre : on tourne UNE seule fois puis on bloque
-            joy_at_center = 0;
-
-            if(dx < -300)
-            {
-                draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
-                heading = (heading + 7) & 7;
-                draw_ship_angle(ship_x, ship_y, heading, pal[ship_color]);
-            }
-            else if(dx > 300)
-            {
-                draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
-                heading = (heading + 1) & 7;
-                draw_ship_angle(ship_x, ship_y, heading, pal[ship_color]);
-            }
+            draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
+            heading = (heading + 7) & 7;
+            draw_ship_angle(ship_x, ship_y, heading, pal[ship_color]);
+            rot_cd = 8;
         }
-        // Si joy_at_center == 0 et joystick toujours pousse : on ne fait rien
+        else if(dx > 300)
+        {
+            draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
+            heading = (heading + 1) & 7;
+            draw_ship_angle(ship_x, ship_y, heading, pal[ship_color]);
+            rot_cd = 8;
+        }
 
         // ================= TIR =================
         if(IO_RB4_GetValue() == 0 && blt_on == 0)
