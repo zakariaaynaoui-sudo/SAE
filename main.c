@@ -312,7 +312,7 @@ void run_game(void)
     {
         cycle_leds();
 
-        // --- JOYSTICK : axe X tourne le vaisseau (CCW / CW) ---
+        // JOYSTICK : rotation proportionnelle a la deflexion du stick
         joy_x = ADCC_GetSingleConversion(channel_X) - 512;
         ax = joy_x > 0 ? joy_x : -joy_x;
 
@@ -320,19 +320,16 @@ void run_game(void)
         {
             rot_cd--;
         }
-        else if(joy_x < -200)
+        else if(ax > 150)
         {
             draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
-            heading = (heading + 7) & 7;
+            if(joy_x < 0) heading = (heading + 7) & 7;
+            else          heading = (heading + 1) & 7;
             draw_ship_angle(ship_x, ship_y, heading, pal[0]);
-            rot_cd = 6;
-        }
-        else if(joy_x > 200)
-        {
-            draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
-            heading = (heading + 1) & 7;
-            draw_ship_angle(ship_x, ship_y, heading, pal[0]);
-            rot_cd = 6;
+            // Plus le joystick est pousse, plus la rotation est rapide
+            if(ax > 450)      rot_cd = 1;
+            else if(ax > 300) rot_cd = 3;
+            else              rot_cd = 5;
         }
         else
         {
