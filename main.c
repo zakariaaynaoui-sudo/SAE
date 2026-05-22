@@ -279,6 +279,23 @@ void show_fin(int pts)
 }
 
 // ----------------------------------------------------------------
+// Retourne le heading 0-7 (0=haut, sens horaire) depuis les axes joystick.
+// Utilise tan(22.5 deg) ~ 5/12 pour des secteurs de 45 deg egaux.
+static int joy_to_heading(int jx, int jy)
+{
+    int ax = jx < 0 ? -jx : jx;
+    int ay = jy < 0 ? -jy : jy;
+
+    if(ax * 12 < ay * 5)               // dans les 22.5 deg autour du vertical
+        return (jy < 0) ? 0 : 4;       // haut / bas
+    if(ay * 12 < ax * 5)               // dans les 22.5 deg autour de l'horizontal
+        return (jx > 0) ? 2 : 6;       // droite / gauche
+    // diagonale
+    if(jx > 0) return (jy < 0) ? 1 : 3;   // haut-droite / bas-droite
+    else        return (jy < 0) ? 7 : 5;   // haut-gauche / bas-gauche
+}
+
+// ----------------------------------------------------------------
 void run_game(void)
 {
     int ship_x  = 160;
@@ -312,7 +329,7 @@ void run_game(void)
     {
         cycle_leds();
 
-        // --- JOYSTICK : direction directe X+Y ---
+        // --- JOYSTICK : direction via atan2 entier ---
         joy_x = ADCC_GetSingleConversion(channel_X) - 512;
         joy_y = ADCC_GetSingleConversion(channel_Y) - 512;
         ax = joy_x > 0 ? joy_x : -joy_x;
@@ -320,22 +337,7 @@ void run_game(void)
 
         if(ax > 200 || ay > 200)
         {
-            int nh = heading;
-            if(ay > ax * 2)
-            {
-                nh = (joy_y < 0) ? 0 : 4;          // haut / bas
-            }
-            else if(ax > ay * 2)
-            {
-                nh = (joy_x > 0) ? 2 : 6;           // droite / gauche
-            }
-            else
-            {
-                if(joy_x > 0 && joy_y < 0) nh = 1;  // haut-droite
-                if(joy_x > 0 && joy_y > 0) nh = 3;  // bas-droite
-                if(joy_x < 0 && joy_y > 0) nh = 5;  // bas-gauche
-                if(joy_x < 0 && joy_y < 0) nh = 7;  // haut-gauche
-            }
+            int nh = joy_to_heading(joy_x, joy_y);
             if(nh != heading)
             {
                 draw_ship_angle(ship_x, ship_y, heading, ILI9341_BLACK);
