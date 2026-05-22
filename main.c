@@ -348,10 +348,11 @@ void run_game(void)
         }
 
         // --- TIR : bouton B ---
+        // La balle part de la pointe du triangle (meme calcul que fx/fy)
         if(IO_RB4_GetValue() == 0 && blt_on == 0)
         {
-            blt_x  = ship_x;
-            blt_y  = ship_y;
+            blt_x  = ship_x + ANG_DX[heading] * 15 / 100;
+            blt_y  = ship_y + ANG_DY[heading] * 15 / 100;
             blt_vx = ANG_DX[heading];
             blt_vy = ANG_DY[heading];
             blt_on = 1;
@@ -405,7 +406,22 @@ void run_game(void)
             }
 
             if(ron[k])
+            {
                 display_drawCircle(rx[k], ry[k], rr[k], ILI9341_LIGHTGREY);
+
+                // Collision asteroide / vaisseau
+                ex = ship_x - rx[k]; if(ex < 0) ex = -ex;
+                ey = ship_y - ry[k]; if(ey < 0) ey = -ey;
+                if(ex < rr[k] + 8 && ey < rr[k] + 8)
+                {
+                    ron[k] = 0;
+                    display_drawCircle(rx[k], ry[k], rr[k], ILI9341_BLACK);
+                    vie--;
+                    draw_hud(pts, vie);
+                    RL_ON(); __delay_ms(400); RL_OFF();
+                    if(vie <= 0) fin = 1;
+                }
+            }
         }
 
         // --- RETOUR MENU : bouton D ---
